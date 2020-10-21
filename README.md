@@ -1,3 +1,8 @@
 # Django REST Framework Magic
 
-Hierarchical role &amp; nested authorization system for Django Rest Framework
+Django REST Framework Magic (DRF Magic) is a Django application that builds off our all of my
+personal best practices of boiler-plates of working with a RESTful Django application. It makes a
+fair amount of subjective coding decisions, but I hope that others see the benefit and
+ease-of-development that they provide.
+
+Read the Documentation: <https://drf-magic.readthedocs.io/en/latest/>

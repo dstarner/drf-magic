@@ -1,0 +1,18 @@
+# These are not pinned so that our testing / coverage stays up to date
+flake8
+pytest
+pytest-cov
+isort
+sphinx
+sphinx-rtd-theme
+m2r2
+
+# From the requirements.txt file
+Django>=3.0.0
+django-admin-list-filter-dropdown>=1.0.3
+django-filter>=2.4.0
+djangorestframework>=3.0.0
+drf-nested-routers>=0.92.0
+drf-yasg>=1.17.0
+python-frontmatter==0.5.0
+inflection>=0.5.
