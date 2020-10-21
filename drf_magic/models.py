@@ -1,0 +1,491 @@
+import contextlib
+import logging
+import re
+import threading
+from collections import namedtuple
+
+from django.contrib.auth import get_user_model
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+from django.db import connection, models, transaction
+
+RoleType = namedtuple('RoleType', ['name', 'description'])
+logger = logging.getLogger(__name__)
+tls = threading.local()  # thread local storage
+
+
+ROLE_SUPERUSER = 'global_superuser'
+ROLE_ADMIN = 'global_admin'
+ROLE_STAFF = 'global_staff'
+UNKNOWN_ROLE = RoleType(name='Unknown Role', description='Unknown or deleted role type')
+
+
+_ROLE_READ = 'read'
+_CORE_ROLES = {
+    _ROLE_READ: RoleType(name='Read Role', description='Ability to read a resource'),
+    'edit': RoleType(name='Edit Role', description='Ability to edit a resource'),
+    'add': RoleType(name='Add Role', description='Ability to add a resource'),
+    'delete': RoleType(name='Delete Role', description='Ability to delete a resource'),
+}
+# Default roles that are included in the system by default
+_DEFAULT_ROLES = dict(**{
+    ROLE_SUPERUSER: RoleType(name='System Superuser', description='Global and root access to the application'),
+    ROLE_ADMIN: RoleType(name='System Administrator', description='Global administrator of the application'),
+    ROLE_STAFF: RoleType(name='System Staff', description='Global staff member of the application'),
+})
+
+# Default role needed to access a resource
+DEFAULT_ROLE = _ROLE_READ
+SINGLETON_ROLES = [ROLE_SUPERUSER, ROLE_ADMIN, ROLE_STAFF]
+
+ROLE_FIELD_MAX_LENGTH = 64
+
+
+def _make_role_field_choices():
+    """Helper to set choices for 'Role.role_field' field
+    """
+    fix_description = lambda x: x.replace('%s', 'resource')  # noqa: E731
+    return ((key, f'{value.name}: {fix_description(value.description)}') for key, value in _DEFAULT_ROLES.items())
+
+
+def check_singleton(func):
+    """
+    check_singleton is a decorator that checks if a user given
+    to a `visible_roles` method is in either of our singleton roles (superuser, etc)
+    and if so, returns their full list of roles without filtering.
+    """
+    def wrapper(*args, **kwargs):
+        singleton_roles = [
+            Role.singleton(name) for name in SINGLETON_ROLES
+        ]
+        user = args[0]
+        if any([user in role for role in singleton_roles]):
+            if len(args) == 2:
+                return args[1]
+            return Role.objects.all()
+        return func(*args, **kwargs)
+    return wrapper
+
+
+@contextlib.contextmanager
+def batch_role_ancestor_rebuilding():
+    """
+    Batches the role ancestor rebuild work necessary whenever role-role
+    relations change. This can result in a big speedup when performing
+    any bulk manipulation.
+    WARNING: Calls to anything related to checking access/permissions
+    while within the context of the batch_role_ancestor_rebuilding will
+    likely not work.
+    """
+
+    batch_role_rebuilding = getattr(tls, 'batch_role_rebuilding', False)
+
+    try:
+        setattr(tls, 'batch_role_rebuilding', True)
+        if not batch_role_rebuilding:
+            setattr(tls, 'additions', set())
+            setattr(tls, 'removals', set())
+        yield
+
+    finally:
+        setattr(tls, 'batch_role_rebuilding', batch_role_rebuilding)
+        if not batch_role_rebuilding:
+            additions = getattr(tls, 'additions')
+            removals = getattr(tls, 'removals')
+            with transaction.atomic():
+                Role.rebuild_role_ancestor_list(list(additions), list(removals))
+            delattr(tls, 'additions')
+            delattr(tls, 'removals')
+
+
+class Role(models.Model):
+    """Manages roles that map users to a role key that provides actions on a resource
+    """
+
+    role_field = models.CharField('Role Key', max_length=ROLE_FIELD_MAX_LENGTH, choices=_make_role_field_choices())
+    singleton_name = models.CharField(
+        'Singleton Name',
+        max_length=ROLE_FIELD_MAX_LENGTH,
+        null=True,
+        blank=True,
+        default=None,
+        choices=_make_role_field_choices(),
+        db_index=True,
+        unique=True
+    )
+
+    members = models.ManyToManyField(get_user_model(), blank=True)
+
+    # Generic foreign key pointing to the managed resource
+    content_type = models.ForeignKey(
+        ContentType, null=True, blank=True, default=None,
+        on_delete=models.CASCADE,
+    )
+    object_id = models.PositiveIntegerField(null=True, blank=True, default=None)
+    content_object = GenericForeignKey('content_type', 'object_id')
+
+    parents = models.ManyToManyField('Role', related_name='children', blank=True)
+    implicit_parents = models.TextField(null=False, default='[]')
+    ancestors = models.ManyToManyField(
+        'Role',
+        through='RoleAncestorEntry',
+        through_fields=('descendent', 'ancestor'),
+        related_name='descendents'
+    )  # auto-generated by `rebuild_role_ancestor_list`
+
+    class Meta:
+        verbose_name = 'Role'
+        verbose_name_plural = 'Roles'
+        default_related_name = 'roles'
+        index_together = [
+            ('content_type', 'object_id')
+        ]
+        ordering = ('content_type', 'object_id')
+
+    def __str__(self):
+        return f'{self.name} (#{self.pk}): {self.description}'
+
+    def __contains__(self, accessor):
+        if isinstance(accessor, get_user_model()):
+            return self.ancestors.filter(members=accessor).exists()
+        if isinstance(accessor, Role):
+            return self.ancestors.filter(pk=accessor.pk).exists()
+
+        accessor_type = ContentType.objects.get_for_model(accessor)
+        role_pks = Role.objects.filter(content_type__pk=accessor_type.id, object_id=accessor.id)
+        return self.ancestors.filter(pk__in=role_pks).exists()
+
+    def save(self, *args, **kwargs):
+        """On save, we will rebuild the role ancestor list
+        """
+        if self.singleton_name and not self.role_field:
+            self.role_field = self.singleton_name
+        super(Role, self).save(*args, **kwargs)
+        self.rebuild_role_ancestor_list([self.id], [])
+
+    def update_member_list(self, usernames, strict=False):
+        """
+        Updates the role to have the given username list as valid members
+        If strict is passed as true, then it will remove any other members. If false, it
+        will simply add the new, missing usernames
+        """
+        if not isinstance(usernames, (set, list)):
+            raise ValueError('Member usernames must be a list or set')
+        usernames = set(usernames)
+
+        existing_member_usernames = set(self.members.values_list('username', flat=True))
+        members_to_add = usernames - existing_member_usernames
+        if members_to_add:
+            logger.info('Adding %d users to "%s": %s', len(members_to_add), self, members_to_add)
+
+        with transaction.atomic():
+            if strict:  # Just set the users explicitly
+                members_to_remove = existing_member_usernames - usernames
+                if members_to_remove:
+                    logger.info('Removing %d users from "%s": %s', len(members_to_remove), self, members_to_remove)
+                self.members.set(usernames)
+            else:      # add whoever is missing
+                for user in usernames:
+                    self.members.add(user)
+            self.save()
+
+    @property
+    def member_count(self):
+        """Returns how many users have this direct role
+        """
+        return self.members.count()
+
+    @property
+    def permissioned_count(self):
+        """Returns how many users either 1) have this direct role or 2) inherit it through a parent role
+        """
+        ancestor_pks = self.ancestors.values_list('id', flat=True)
+        return self.members.through.objects.filter(role_id__in=ancestor_pks).count()
+
+    @property
+    def name(self):
+        return _DEFAULT_ROLES.get(self.key, UNKNOWN_ROLE).name
+
+    @property
+    def key(self):
+        return self.singleton_name if self.singleton_name else self.role_field
+
+    @property
+    def description(self):
+        description = _DEFAULT_ROLES.get(self.role_field, UNKNOWN_ROLE).description
+        content_type = self.content_type
+        model_name = None
+        if content_type:
+            model = content_type.model_class()
+            model_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', model.__name__).lower()
+
+        if '%s' in description and self.content_object:
+            description = description % (f'{model_name} {self.content_object}')
+        return description
+
+    @property
+    def is_singleton(self):
+        return self.singleton_name in SINGLETON_ROLES
+
+    @staticmethod
+    def rebuild_role_ancestor_list(additions, removals):
+        """
+        Updates our `ancestors` map to accurately reflect all of the ancestors for a role
+        You should never need to call this. Signal handlers should be calling
+        this method when the role hierarchy changes automatically.
+        """
+        # The ancestry table
+        # =================================================
+        #
+        #   The role ancestors table denormalizes the parental relations
+        #   between all roles in the system. If you have role A which is a
+        #   parent of B which is a parent of C, then the ancestors table will
+        #   contain a row noting that B is a descendent of A, and two rows for
+        #   denoting that C is a descendent of both A and B. In addition to
+        #   storing entries for each descendent relationship, we also store an
+        #   entry that states that C is a 'descendent' of itself, C. This makes
+        #   usage of this table simple in our queries as it enables us to do
+        #   straight joins where we would have to do unions otherwise.
+        #
+        # The simple version of what this function is doing
+        # =================================================
+        #
+        #   When something changes in our role "hierarchy", we need to update
+        #   the `Role.ancestors` mapping to reflect these changes. The basic
+        #   idea, which the code in this method is modeled after, is to do
+        #   this: When a change happens to a role's parents list, we update
+        #   that role's ancestry list, then we recursively update any child
+        #   roles ancestry lists.  Because our role relationships are not
+        #   strictly hierarchical, and can even have loops, this process may
+        #   necessarily visit the same nodes more than once. To handle this
+        #   without having to keep track of what should be updated (again) and
+        #   in what order, we simply use the termination condition of stopping
+        #   when our stored ancestry list matches what our list should be, eg,
+        #   when nothing changes. This can be simply implemented:
+        #
+        #      if actual_ancestors != stored_ancestors:
+        #          for id in actual_ancestors - stored_ancestors:
+        #              self.ancestors.add(id)
+        #          for id in stored_ancestors - actual_ancestors:
+        #              self.ancestors.remove(id)
+        #
+        #          for child in self.children.all():
+        #              child.rebuild_role_ancestor_list()
+        #
+        #   However this results in a lot of calls to the database, so the
+        #   optimized implementation below effectively does this same thing,
+        #   but we update all children at once, so effectively we sweep down
+        #   through our hierarchy one layer at a time instead of one node at a
+        #   time. Because of how this method works, we can also start from many
+        #   roots at once and sweep down a large set of roles, which we take
+        #   advantage of when performing bulk operations.
+        #
+        #
+        # SQL Breakdown
+        # =============
+        #   We operate under the assumption that our parent's ancestor list is
+        #   correct, thus we can always compute what our ancestor list should
+        #   be by taking the union of our parent's ancestor lists and adding
+        #   our self reference entry where ancestor_id = descendent_id
+        #
+        #   The DELETE query deletes all entries in the ancestor table that
+        #   should no longer be there (as determined by the NOT EXISTS query,
+        #   which checks to see if the ancestor is still an ancestor of one
+        #   or more of our parents)
+        #
+        #   The INSERT query computes the list of what our ancestor maps should
+        #   be, and inserts any missing entries.
+        #
+        #   Once complete, we select all of the children for the roles we are
+        #   working with, this list becomes the new role list we are working
+        #   with.
+        #
+        #   When our delete or insert query return that they have not performed
+        #   any work, then we know that our children will also not need to be
+        #   updated, and so we can terminate our loop.
+        #
+        #
+        if len(additions) == 0 and len(removals) == 0:
+            return
+
+        global tls
+        batch_role_rebuilding = getattr(tls, 'batch_role_rebuilding', False)
+
+        if batch_role_rebuilding:
+            getattr(tls, 'additions').update(set(additions))
+            getattr(tls, 'removals').update(set(removals))
+            return
+
+        cursor = connection.cursor()
+        loop_ct = 0
+
+        sql_params = {
+            'ancestors_table': Role.ancestors.through._meta.db_table,
+            'parents_table': Role.parents.through._meta.db_table,
+            'roles_table': Role._meta.db_table,
+        }
+
+        # SQLlite has a 1M sql statement limit.. since the django sqllite
+        # driver isn't letting us pass in the ids through the preferred
+        # parameter binding system, this function exists to obey this.
+        # est max 12 bytes per number, used up to 2 times in a query,
+        # minus 4k of padding for the other parts of the query, leads us
+        # to the magic number of 41496, or 40000 for a nice round number
+        def split_ids_for_sqlite(role_ids):
+            for i in range(0, len(role_ids), 40000):
+                yield role_ids[i:i + 40000]
+
+        with transaction.atomic():
+            while len(additions) > 0 or len(removals) > 0:
+                if loop_ct > 100:
+                    raise Exception('Role ancestry rebuilding error: infinite loop detected')
+                loop_ct += 1
+
+                delete_ct = 0
+                if len(removals) > 0:
+                    for ids in split_ids_for_sqlite(removals):
+                        sql_params['ids'] = ','.join(str(x) for x in ids)
+                        cursor.execute("""
+                            DELETE FROM %(ancestors_table)s
+                            WHERE descendent_id IN (%(ids)s)
+                                  AND descendent_id != ancestor_id
+                                  AND NOT EXISTS (
+                                      SELECT 1
+                                        FROM %(parents_table)s as parents
+                                             INNER JOIN %(ancestors_table)s as inner_ancestors
+                                                     ON (parents.to_role_id = inner_ancestors.descendent_id)
+                                       WHERE parents.from_role_id = %(ancestors_table)s.descendent_id
+                                             AND %(ancestors_table)s.ancestor_id = inner_ancestors.ancestor_id
+                                  )
+                        """ % sql_params)
+
+                        delete_ct += cursor.rowcount
+
+                insert_ct = 0
+                if len(additions) > 0:
+                    for ids in split_ids_for_sqlite(additions):
+                        sql_params['ids'] = ','.join(str(x) for x in ids)
+                        cursor.execute("""
+                            INSERT INTO %(ancestors_table)s (descendent_id, ancestor_id, role_field, content_type_id, object_id)
+                            SELECT from_id, to_id, new_ancestry_list.role_field, new_ancestry_list.content_type_id, new_ancestry_list.object_id FROM  (
+                                  SELECT roles.id from_id,
+                                         ancestors.ancestor_id to_id,
+                                         roles.role_field,
+                                         COALESCE(roles.content_type_id, 0) content_type_id,
+                                         COALESCE(roles.object_id, 0) object_id
+                                    FROM %(roles_table)s as roles
+                                         INNER JOIN %(parents_table)s as parents
+                                                 ON (parents.from_role_id = roles.id)
+                                         INNER JOIN %(ancestors_table)s as ancestors
+                                                 ON (parents.to_role_id = ancestors.descendent_id)
+                                   WHERE roles.id IN (%(ids)s)
+                                   UNION
+                                  SELECT id from_id,
+                                         id to_id,
+                                         role_field,
+                                         COALESCE(content_type_id, 0) content_type_id,
+                                         COALESCE(object_id, 0) object_id
+                                   from %(roles_table)s WHERE id IN (%(ids)s)
+                             ) new_ancestry_list
+                             WHERE NOT EXISTS (
+                                SELECT 1 FROM %(ancestors_table)s
+                                 WHERE %(ancestors_table)s.descendent_id = new_ancestry_list.from_id
+                                       AND %(ancestors_table)s.ancestor_id = new_ancestry_list.to_id
+                             )
+                        """ % sql_params)
+                        insert_ct += cursor.rowcount
+
+                if insert_ct == 0 and delete_ct == 0:
+                    break
+
+                new_additions = set()
+                for ids in split_ids_for_sqlite(additions):
+                    sql_params['ids'] = ','.join(str(x) for x in ids)
+                    # get all children for the roles we're operating on
+                    cursor.execute(
+                        'SELECT DISTINCT from_role_id FROM %(parents_table)s WHERE to_role_id IN (%(ids)s)' % sql_params
+                    )
+                    new_additions.update([row[0] for row in cursor.fetchall()])
+                additions = list(new_additions)
+
+                new_removals = set()
+                for ids in split_ids_for_sqlite(removals):
+                    sql_params['ids'] = ','.join(str(x) for x in ids)
+                    # get all children for the roles we're operating on
+                    cursor.execute(
+                        'SELECT DISTINCT from_role_id FROM %(parents_table)s WHERE to_role_id IN (%(ids)s)' % sql_params
+                    )
+                    new_removals.update([row[0] for row in cursor.fetchall()])
+                removals = list(new_removals)
+
+    @staticmethod
+    def visible_roles(user):
+        return Role.filter_visible_roles(user, Role.objects.all())
+
+    def is_ancestor_of(self, role):
+        return role.ancestors.filter(id=self.id).exists()
+
+    @staticmethod
+    def singleton(name):
+        role, _ = Role.objects.get_or_create(singleton_name=name, role_field=name)
+        return role
+
+    @staticmethod
+    @check_singleton
+    def filter_visible_roles(user, roles_qs):
+        """
+        Visible roles include all roles that are ancestors of any
+        roles that the user has access to.
+        Case in point - organization auditor_role must see all roles
+        in their organization, but some of those roles descend from
+        organization admin_role, but not auditor_role.
+        """
+        return roles_qs.filter(
+            id__in=RoleAncestorEntry.objects.filter(
+                descendent__in=RoleAncestorEntry.objects.filter(
+                    ancestor_id__in=list(user.roles.values_list('id', flat=True))
+                ).values_list('descendent', flat=True)
+            ).distinct().values_list('ancestor', flat=True)
+        )
+
+
+class RoleAncestorEntry(models.Model):
+
+    class Meta:
+        verbose_name = 'Role Ancestor'
+        verbose_name_plural = 'Role Ancestors'
+        db_table = 'core_role_ancestors'
+        index_together = [
+            ('ancestor', 'content_type_id', 'object_id'),     # used by get_roles_on_resource
+            ('ancestor', 'content_type_id', 'role_field'),    # used by accessible_objects
+            ('ancestor', 'descendent'),                       # used by rebuild_role_ancestor_list
+                                                              #      in the NOT EXISTS clauses.
+        ]
+
+    descendent = models.ForeignKey(Role, null=False, on_delete=models.CASCADE, related_name='+')
+    ancestor = models.ForeignKey(Role, null=False, on_delete=models.CASCADE, related_name='+')
+    role_field = models.CharField(max_length=ROLE_FIELD_MAX_LENGTH, null=False)
+    content_type_id = models.PositiveIntegerField(null=False)
+    object_id = models.PositiveIntegerField(null=False)
+
+
+def get_roles_on_resource(resource, accessor):
+    """
+    Returns a string list of the roles a accessor has for a given resource.
+    An accessor can be either a User, Role, or an arbitrary resource that
+    contains one or more Roles associated with it.
+    """
+
+    if isinstance(accessor, get_user_model()):
+        resource_roles = accessor.roles.all()
+    elif isinstance(accessor, Role):
+        resource_roles = [accessor]
+    else:
+        accessor_type = ContentType.objects.get_for_model(accessor)
+        resource_roles = Role.objects.filter(content_type__pk=accessor_type.id, object_id=accessor.id)
+
+    return list(RoleAncestorEntry.objects.filter(
+        ancestor__in=resource_roles,
+        content_type_id=ContentType.objects.get_for_model(resource).id,
+        object_id=resource.id
+    ).values_list('role_field', flat=True).distinct())

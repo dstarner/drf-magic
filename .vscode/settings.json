@@ -1,0 +1,12 @@
+{
+    // Must be Python 3.7+
+    "python.pythonPath": "${workspaceFolder}/venv/bin/python",
+    "files.exclude": {
+        "**/__pycache__": true
+    },
+    "python.linting.flake8Enabled": true,
+    "python.linting.flake8Path": "flake8",
+    "python.testing.unittestEnabled": false,
+    "python.testing.nosetestsEnabled": false,
+    "python.testing.pytestEnabled": false,
+}
