@@ -90,8 +90,8 @@ if __name__ == "__main__":
         else:
             pytest_args = [
                 '--cov', '.',
-                '--cov-report', 'term',
-                '--cov-report', 'html',
+                '--cov-report=term',
+                '--cov-report=html',
             ] + pytest_args
 
         if first_arg.startswith('-'):
