@@ -33,6 +33,7 @@ release = drf_magic.__version__
 extensions = [
     'sphinx_rtd_theme',
     'm2r2',
+    'sphinx.ext.autodoc',
 ]
 
 # Add any paths that contain templates here, relative to this directory.

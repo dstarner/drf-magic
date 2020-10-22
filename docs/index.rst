@@ -16,8 +16,10 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 2
+   :glob:
 
    dev/contributing
+   areas/*
 
 Indices and tables
 ++++++++++++++++++

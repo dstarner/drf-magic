@@ -24,10 +24,8 @@ __serializer_mapper = {
 def register_main_serializer(serializer_class):
     """
     Registers a ModelSerializer as the main serializer for a model type when attached
-
-    @register_main_serializer
-    class MyModelSerializer(serializers.ModelSerializer):
-        ...
+    as a decorator on the serializer class declaration. It uses the Meta.model attribute,
+    and each model can only have a single main serializer associated with it.
     """
     meta_class = getattr(serializer_class, '_meta', serializer_class.Meta)
     model_class = meta_class.model
@@ -49,13 +47,13 @@ def register_main_serializer(serializer_class):
 
 
 def load_model_serializer(model_class):
-    """Used to safely load a serializer from the serializer map
+    """Used to safely load a serializer from the main serializer-to-model map
     """
     return __serializer_mapper.get(model_class, None)
 
 
 class AutoSerializerAppConfig(AppConfig):
-    """Will attempt to load and register the app's serializers automatically
+    """Will attempt to load and register the app's serializers automatically on app load
     """
 
     serializer_path = 'serializers'

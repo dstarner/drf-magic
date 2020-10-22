@@ -1,0 +1,4 @@
+.. _authorizationPage:
+
+Authorization & Permissions
+===========================
