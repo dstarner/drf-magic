@@ -1,6 +1,6 @@
 import logging
 
-from drf_yasg.generators import OpenAPISchemaGenerator
+from drf_yasg2.generators import OpenAPISchemaGenerator
 from rest_framework.settings import api_settings
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class VersionAgnosticSchemaGenerator(OpenAPISchemaGenerator):  # pragma: no cove
         if hasattr(view, 'categories') and _is_iterable(view.categories):
             tags = view.categories
         if hasattr(view, 'doc_category_from_parent') and view.doc_category_from_parent:
-            parent = view.parent_viewset()
+            parent = view.parent_view()
             tags = self.get_categories(parent, operation)
         elif hasattr(view, 'model') and view.model:
             tags = [view.model._meta.verbose_name_plural.replace(' ', '-').lower()]

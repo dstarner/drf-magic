@@ -3,10 +3,10 @@ import logging
 import frontmatter
 import inflection
 from django.conf import settings
-from drf_yasg import openapi
-from drf_yasg.inspectors import SwaggerAutoSchema
-from drf_yasg.utils import get_serializer_ref_name
-from drf_yasg.views import get_schema_view
+from drf_yasg2 import openapi
+from drf_yasg2.inspectors import SwaggerAutoSchema
+from drf_yasg2.utils import get_serializer_ref_name
+from drf_yasg2.views import get_schema_view
 from rest_framework import permissions
 from rest_framework.utils import formatting
 
@@ -77,7 +77,7 @@ class SmartSummaryAutoSchema(SwaggerAutoSchema):
             meta = model._meta
             for attr in ['verbose_name', 'verbose_name_plural']:
                 format_kwargs[attr] = getattr(meta, attr)
-        parent_view = self.view.parent_viewset() if hasattr(self.view, 'parent_viewset') else None
+        parent_view = self.view.parent_view() if hasattr(self.view, 'parent_viewset') else None
         parent_model = None if not parent_view else getattr(parent_view, 'model', None)
         if parent_model:
             meta = parent_model._meta
@@ -151,8 +151,8 @@ description = ''
 with open(configuration['DESCRIPTION_PATH'], 'r') as f:
     description = f.read()
 
-contact = configuration['CONTACT']
-logo = configuration['LOGO']
+contact = configuration.get('CONTACT', None)
+logo = configuration.get('LOGO', None)
 
 # Used to generate the Swagger / ReDoc documentation automatically
 SchemaView = get_schema_view(
@@ -160,11 +160,13 @@ SchemaView = get_schema_view(
         title=configuration['TITLE'],
         default_version=configuration['VERSION'],
         description=description,
-        contact=openapi.Contact(
-            name=contact['NAME'],
-            email=contact['EMAIL']
+        contact=None if not contact else (
+            openapi.Contact(
+                name=contact['NAME'],
+                email=contact['EMAIL']
+            )
         ),
-        x_logo={
+        x_logo=None if not logo else {
             'url': logo['SRC'],
             'backgroundColor': '#fafafa',
             'altText': configuration['TITLE'],

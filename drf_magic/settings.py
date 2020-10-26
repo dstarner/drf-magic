@@ -5,6 +5,11 @@ from django.utils.module_loading import import_string
 DEFAULTS = {
     'FAIL_ON_MISSING_SERIALIZER_FILE': False,
     'FAIL_ON_MISSING_ACCESSOR_FILE': False,
+    'ALLOW_ON_MISSING_ACCESSOR': False,
+
+    'PAGE_SIZE_QUERY_PARAM': 'page_size',
+    'MAX_PAGE_SIZE': 150,
+    'PAGE_SIZE': 25,
 }
 
 
@@ -13,9 +18,7 @@ IMPORT_STRINGS = []
 
 
 # List of settings that have been removed
-REMOVED_SETTINGS = [
-    'PAGINATE_BY', 'PAGINATE_BY_PARAM', 'MAX_PAGINATE_BY',
-]
+REMOVED_SETTINGS = []
 
 
 def perform_import(val, setting_name):
@@ -100,13 +103,13 @@ class APISettings:
             delattr(self, '_user_settings')
 
 
-api_settings = APISettings(None, DEFAULTS, IMPORT_STRINGS)
+magic_settings = APISettings(None, DEFAULTS, IMPORT_STRINGS)
 
 
-def reload_api_settings(*args, **kwargs):
+def reload_magic_settings(*args, **kwargs):
     setting = kwargs['setting']
     if setting == 'DRF_MAGIC':
-        api_settings.reload()
+        magic_settings.reload()
 
 
-setting_changed.connect(reload_api_settings)
+setting_changed.connect(reload_magic_settings)

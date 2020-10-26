@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 
-from .models import Role, RoleAncestorEntry, get_roles_on_resource
+from . import Role, RoleAncestorEntry, get_roles_on_resource
 
 
 class RoleManagedModelMixin(models.Model):
@@ -76,10 +76,3 @@ class RoleManagedModelMixin(models.Model):
             role_field=role_field,
             **ct_kwarg
         ).values_list('object_id').distinct()
-
-
-class SlugLookupMixin:
-    """The default lookup for any viewset that inherits this will be via its 'slug' field
-    """
-    lookup_url_kwarg = 'slug'
-    lookup_field = 'slug'

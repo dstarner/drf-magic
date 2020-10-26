@@ -26,7 +26,7 @@ def resolve_role_field(obj, field):
         return []
 
     if len(field_components) == 1:
-        role_cls = apps.get_model('access', 'Role')
+        role_cls = apps.get_model('drf_magic', 'Role')
         if not isinstance(obj, role_cls):
             raise Exception(force_str('{} refers to a {}, not a Role'.format(field, type(obj))))
         ret.append(obj.id)
@@ -71,7 +71,7 @@ class ImplicitRoleField(models.ForeignKey):
     def __init__(self, *args, parent_role=None, **kwargs):
         self.parent_role = parent_role
 
-        kwargs.setdefault('to', 'access.Role')
+        kwargs.setdefault('to', 'drf_magic.Role')
         kwargs.setdefault('related_name', '+')
         kwargs.setdefault('null', 'True')
         kwargs.setdefault('editable', False)
@@ -155,7 +155,7 @@ class ImplicitRoleField(models.ForeignKey):
         return _m2m_update
 
     def _post_save(self, instance, created, *args, **kwargs):
-        Role_ = apps.get_model('access', 'Role')
+        Role_ = apps.get_model('drf_magic', 'Role')
         ContentType_ = apps.get_model('contenttypes', 'ContentType')
         ct_id = ContentType_.objects.get_for_model(instance).id
 
@@ -200,7 +200,7 @@ class ImplicitRoleField(models.ForeignKey):
         for path in paths:
             if path.startswith('singleton:'):
                 singleton_name = path[10:]
-                Role_ = apps.get_model('access', 'Role')
+                Role_ = apps.get_model('drf_magic', 'Role')
                 qs = Role_.objects.filter(singleton_name=singleton_name)
                 if qs.count() >= 1:
                     role = qs[0]
@@ -219,7 +219,7 @@ class ImplicitRoleField(models.ForeignKey):
         for implicit_role_field in getattr(instance.__class__, '__implicit_role_fields'):
             role_ids.append(getattr(instance, implicit_role_field.name + '_id'))
 
-        Role_ = apps.get_model('access', 'Role')
+        Role_ = apps.get_model('drf_magic', 'Role')
         child_ids = list(Role_.parents.through.objects.filter(
             to_role_id__in=role_ids
         ).distinct().values_list('from_role_id', flat=True))

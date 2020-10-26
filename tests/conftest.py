@@ -1,8 +1,14 @@
 import os
+import shutil
 import sys
 
 import django
 from django.core import management
+
+TEST_PREFIX = 'tests'
+test_apps = [
+    'test_app',
+]
 
 
 def pytest_addoption(parser):
@@ -57,27 +63,20 @@ def pytest_configure(config):
             'django.contrib.staticfiles',
             'drf_magic',
             'tests',
-            'tests.test_app',
-        ),
+        ) + tuple(map(lambda x: f'{TEST_PREFIX}.{x}', test_apps)),
+        SWAGGER_SETTINGS={
+            'DEFAULT_GENERATOR_CLASS': 'drf_magic.docs.generators.VersionAgnosticSchemaGenerator',
+            'DEFAULT_AUTO_SCHEMA_CLASS': 'drf_magic.docs.schema.SmartSummaryAutoSchema',
+        },
+        YASG_SCHEMA={
+            'TITLE': 'Test Docs',
+            'VERSION': '0.1.0',
+            'DESCRIPTION_PATH': os.path.join(os.path.dirname(__file__), 'dummy_api_desc.md'),
+        },
         PASSWORD_HASHERS=(
             'django.contrib.auth.hashers.MD5PasswordHasher',
         ),
     )
-
-    # guardian is optional
-    try:
-        import guardian  # NOQA
-    except ImportError:
-        pass
-    else:
-        settings.ANONYMOUS_USER_ID = -1
-        settings.AUTHENTICATION_BACKENDS = (
-            'django.contrib.auth.backends.ModelBackend',
-            'guardian.backends.ObjectPermissionBackend',
-        )
-        settings.INSTALLED_APPS += (
-            'guardian',
-        )
 
     if config.getoption('--no-pkgroot'):
         sys.path.pop(0)
@@ -95,9 +94,18 @@ def pytest_configure(config):
 
     django.setup()
 
+    for app in test_apps:
+        management.call_command('makemigrations', app)
+
     runner = DiscoverRunner()
     runner.setup_test_environment()
     runner.setup_databases()
 
     if config.getoption('--staticfiles'):
         management.call_command('collectstatic', verbosity=0, interactive=False)
+
+
+def pytest_unconfigure():
+    for app in test_apps:
+        migrations_path = os.path.join(TEST_PREFIX, app, 'migrations')
+        shutil.rmtree(migrations_path, ignore_errors=True)

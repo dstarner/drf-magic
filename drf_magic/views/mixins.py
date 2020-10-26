@@ -3,47 +3,54 @@ import logging
 
 import inflection
 from django.core.exceptions import ObjectDoesNotExist
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+from drf_yasg2 import openapi
+from drf_yasg2.utils import swagger_auto_schema
 from rest_framework.decorators import action as drf_action
 from rest_framework.exceptions import APIException, NotFound
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.serializers import BooleanField, Serializer
-from rest_framework.views import APIView
 
-from .access.accessors import (
+from ..access.accessors import (
     access_registry, check_user_access, instance_to_accessor
 )
-from .mixins import SlugLookupMixin
-from .routers import NestedRouter
-from .utils import classproperty
+from ..routers import NestedRouter
+from ..serializers.viewsets import AutoSerializerViewMixin
+from ..utils import classproperty
+
+__all__ = [
+    'AutoNestedRouterViewsetMixin',
+    'AutoSerializerViewMixin',
+    'AutoNestedAccessorPermissionMixin',
+    'SlugLookupMixin',
+]
 
 logger = logging.getLogger(__name__)
 
 
-class _CoreView(APIView, metaclass=classproperty.meta):
-    """Uses DRF magic to handle queryset and serializer
+class SlugLookupMixin:
+    """The default lookup for any viewset that inherits this will be via its 'slug' field
+    """
+    lookup_url_kwarg = 'slug'
+    lookup_field = 'slug'
+
+
+class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
+    """Allows for automatic router management and viewset nesting abilities
     """
 
-    # Model that view handles
-    model = None
-    queryset = None
-
-    # Explicitly set the URL routing and base_name
-    _lookup_field = 'id'
-    _lookup_url_kwarg = 'id'
+    model = None  # used for generating router and url configurations
 
     # If the model's parent field is not named the same as the lookup kwarg, include
     # this on the subclass and it will perform the foreign key lookup against it
     parent_related_field = None
 
-    router = None  # Do NOT set this manually
+    # Explicitly set the URL routing and base_name
+    _lookup_field = 'id'
+    _lookup_url_kwarg = 'id'
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if not self.model and not self.queryset and not hasattr(self, 'get_queryset'):
-            raise ValueError(f'"model" must be set on the {self.__class__}')
+    # Pointer to the parent router, building a linked list implementation
+    router = None
 
     @classmethod
     def alter_parent_filters(cls, filters):
@@ -53,43 +60,15 @@ class _CoreView(APIView, metaclass=classproperty.meta):
         """
         return filters
 
-    def get_object(self, permission_check=True):
-        """
-        Returns the object the view is displaying.
-
-        Overridden so that we can skip the permission check if desired
-        I did not change anything meaningful other than permission_check
-        """
-        queryset = self.filter_queryset(self.get_queryset())
-
-        # Perform the lookup filtering.
-        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
-
-        assert lookup_url_kwarg in self.kwargs, (
-            'Expected view %s to be called with a URL keyword argument '
-            'named "%s". Fix your URL conf, or set the `.lookup_field` '
-            'attribute on the view correctly.' %
-            (self.__class__.__name__, lookup_url_kwarg)
-        )
-
-        filter_kwargs = {self.lookup_field: self.kwargs[lookup_url_kwarg]}
-        obj = get_object_or_404(queryset, **filter_kwargs)
-
-        # May raise a permission denied
-        if permission_check:
-            self.check_object_permissions(self.request, obj)
-
-        return obj
-
     def get_queryset(self):
         """
-        Tries to build the correct queryset from the current model and parent
-        permissions. It will scope all items to what is visible to the user
+        Tries to build the correct queryset from the current view and parent
+        routes.
         """
         qs = None
-        if self.queryset is not None:
+        if getattr(self, 'queryset', None) is not None:
             qs = self.queryset._clone()
-        elif self.model:
+        elif getattr(self, 'model', None):
             qs = self.model.objects.all()
         else:
             qs = super().get_queryset()
@@ -98,7 +77,7 @@ class _CoreView(APIView, metaclass=classproperty.meta):
         format_requested = self.request.GET.get('format', 'json')
         if any([
                 format_requested in ['openapi', ['openapi']],
-                self.parent_viewset() is not None and self.kwargs == {}
+                self.parent_view() is not None and self.kwargs == {}
         ]):
             return qs.none()
 
@@ -108,50 +87,14 @@ class _CoreView(APIView, metaclass=classproperty.meta):
         if viewset_filters and isinstance(viewset_filters, dict):
             parent_filters = viewset_filters
 
+        # Add the parent filters to the current QS to return a scoped queryset
         if parent_filters:
             logger.debug(
-                'Adding the following parent filters to the %s queryset: %s', self.model.__name__, parent_filters
+                'Adding the following parent filters to the %s queryset: %s',
+                self.model.__name__, parent_filters
             )
             qs = qs.filter(**parent_filters)
-
         return qs
-
-    @classmethod
-    def check_view_permission(cls, request, url_kwargs, action='read'):
-        """
-        Checks if the request has permission to perform action on the view
-        Note that this works recursively, calling up the parent viewsets as well
-        unless check_parent_permissions is set, which can be used in testing
-        """
-        parent = cls.parent_viewset()
-        if parent and getattr(cls, 'check_parent_permissions', True):
-            # This little block of code is responsible for "bumping up" the URL kwargs
-            # as if the request was on the parent viewset instead of the child.
-            # It removes the current-level kwarg and removes the prefix from the
-            # immediate parent so that it becomes the current level.
-            nested_url_kwargs = url_kwargs.copy()
-            nested_url_kwargs.pop(cls.lookup_url_kwarg, None)
-            if parent.prefixed_lookup_url_kwarg in nested_url_kwargs:
-                nested_url_kwargs[parent.lookup_url_kwarg] = url_kwargs[parent.prefixed_lookup_url_kwarg]
-                nested_url_kwargs.pop(parent.prefixed_lookup_url_kwarg, None)
-
-            # Recursively call on the parent (done before children calls)
-            # Note that for parents, we just need read permission to access a child view
-            if not parent.check_view_permission(request, nested_url_kwargs, action='read'):
-                logger.debug('PERMISSIONS: %s denied permission to child %s', parent.__name__, cls.__name__)
-                return False
-
-        if not cls.model:
-            return True
-
-        view = cls(request=request, kwargs=url_kwargs)
-        instance = None
-        if cls.lookup_url_kwarg in url_kwargs:
-            instance = view.get_object(permission_check=False)
-        return check_user_access(
-            request.user, cls.model, action,
-            instance=instance, request=request, view=cls, url_kwargs=url_kwargs
-        )
 
     @classmethod
     def build_parent_filter_context(cls, kwargs=None, context=None):
@@ -164,7 +107,7 @@ class _CoreView(APIView, metaclass=classproperty.meta):
         if not kwargs:
             kwargs = {}
         parents = [cls]
-        parent_viewset = cls.parent_viewset()
+        parent_viewset = cls.parent_view()
 
         # Generates a long string of the deepest nested queryset filter() key needed
         # For example "tier__stack__cluster". This is used in the next step
@@ -181,7 +124,7 @@ class _CoreView(APIView, metaclass=classproperty.meta):
             filter_prefix.append(lookup_prefix)
 
             parents = [parent_viewset] + parents
-            parent_viewset = parent_viewset.parent_viewset()
+            parent_viewset = parent_viewset.parent_view()
 
         # Builds the longest parent filter, so that we can
         # break it down into smaller parts in the next step
@@ -247,21 +190,54 @@ class _CoreView(APIView, metaclass=classproperty.meta):
         )
 
     @classmethod
-    def parent_viewset(cls):
+    def parent_view(cls):
+        """Returns the parent view[set] class if one is configured
+        """
         if not cls.router:
             return None
         return cls.router.root_viewset_cls if hasattr(cls.router, 'root_viewset_cls') else None
 
     @classmethod
-    def parent_viewset_for_model(cls, model):
+    def parent_view_for_model(cls, model):
         """Returns the first parent viewset associated with the given model
         """
-        parent_viewset = cls.parent_viewset()
+        parent_viewset = cls.parent_view()
         while parent_viewset:
             if parent_viewset.model == model:
                 return parent_viewset
-            parent_viewset = parent_viewset.parent_viewset()
+            parent_viewset = parent_viewset.parent_view()
         return None
+
+    def get_object(self, permission_check=True):
+        """
+        Returns the object the view is displaying.
+
+        Overridden so that we can skip the permission check if desired
+        I did not change anything meaningful other than permission_check
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # Perform the lookup filtering.
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+
+        assert lookup_url_kwarg in self.kwargs, (
+            'Expected view %s to be called with a URL keyword argument '
+            'named "%s". Fix your URL conf, or set the `.lookup_field` '
+            'attribute on the view correctly.' %
+            (self.__class__.__name__, lookup_url_kwarg)
+        )
+
+        filter_kwargs = {self.lookup_field: self.kwargs[lookup_url_kwarg]}
+        obj = get_object_or_404(queryset, **filter_kwargs)
+
+        # May raise a permission denied
+        if permission_check:
+            self.check_object_permissions(self.request, obj)
+        return obj
+
+    # ------------------------------------------------------------------------------------
+    # The following @classproperty values represent the defaults configured in this mixin.
+    # If a custom value is desired, it can be overridden on the concrete view[set] class
 
     @classproperty
     def base_name(self):
@@ -274,7 +250,7 @@ class _CoreView(APIView, metaclass=classproperty.meta):
 
     @classproperty
     def url_route(self):
-        """Returns the URL portion for this viewset
+        """Returns the URL portion for this view
         """
         if not self.model:
             raise ValueError(f'expected {self} ".model" or ".url_route" to be defined')
@@ -282,12 +258,16 @@ class _CoreView(APIView, metaclass=classproperty.meta):
 
     @classproperty
     def lookup_field(self):
+        """Returns the lookup field that is used on the model for get_object()
+        """
         if SlugLookupMixin in self.mro():
             return SlugLookupMixin.lookup_field
         return self._lookup_field
 
     @classproperty
     def lookup_url_kwarg(self):
+        """Returns the URL regex parameter name that is used on the model for get_object()
+        """
         if SlugLookupMixin in self.mro():
             return SlugLookupMixin.lookup_url_kwarg
         return self._lookup_url_kwarg
@@ -303,19 +283,87 @@ class _CoreView(APIView, metaclass=classproperty.meta):
 
     @classproperty
     def prefixed_lookup_url_kwarg(self):
+        """
+        If accessing the URL kwarg on a parent, its lookup_url_kwarg will be prefixed,
+        so this is a helper method that can adjust the URL kwargs key lookup dynamically
+        """
         return f'{self.lookup_url_prefix}_{self.lookup_url_kwarg}'
 
     @classproperty
     def router_name(self):
+        """Returns the router name by looking up against the configured model
+        """
+        if not self.model:
+            raise ValueError(f'expected {self} ".model" or ".router_name" to be defined')
         return inflection.humanize(self.model._meta.verbose_name.lower().replace(' ', '_'))
 
 
-class BasePermissionedViewset(_CoreView):
-    """Mixin that allows a ViewSet to take advantage of the RBAC system
-    """
+class AutoNestedAccessorPermissionMixin(AutoNestedRouterViewsetMixin):
+
+    # By default, check if a request has access to the parent view[set]
+    check_parent_permissions = True
 
     # Allows settings a base role that is required for all actions (like must have read role)
     base_role = None
+
+    @classmethod
+    def check_view_permission(cls, request, url_kwargs, action='read'):
+        """
+        Checks if the request has permission to perform action on the view
+        Note that this works recursively, calling up the parent viewsets as well
+        unless check_parent_permissions is set, which can be used in testing
+        """
+        parent = cls.parent_view()
+        if parent and getattr(cls, 'check_parent_permissions', True):
+            # This little block of code is responsible for "bumping up" the URL kwargs
+            # as if the request was on the parent viewset instead of the child.
+            # It removes the current-level kwarg and removes the prefix from the
+            # immediate parent so that it becomes the current level.
+            nested_url_kwargs = url_kwargs.copy()
+            nested_url_kwargs.pop(cls.lookup_url_kwarg, None)
+            if parent.prefixed_lookup_url_kwarg in nested_url_kwargs:
+                nested_url_kwargs[parent.lookup_url_kwarg] = url_kwargs[parent.prefixed_lookup_url_kwarg]
+                nested_url_kwargs.pop(parent.prefixed_lookup_url_kwarg, None)
+
+            # Recursively call on the parent (done before children calls)
+            # Note that for parents, we just need read permission to access a child view
+            if not parent.check_view_permission(request, nested_url_kwargs, action='read'):
+                logger.debug('PERMISSIONS: %s denied permission to child %s', parent.__name__, cls.__name__)
+                return False
+
+        if not cls.model:
+            return True
+
+        view = cls(request=request, kwargs=url_kwargs)
+        instance = None
+        if cls.lookup_url_kwarg in url_kwargs:
+            instance = view.get_object(permission_check=False)
+        return check_user_access(
+            request.user, cls.model, action,
+            instance=instance, request=request, view=cls, url_kwargs=url_kwargs
+        )
+
+    def get_queryset(self):
+        """
+        Looks at self.model and returns a subset of items using the accessor class
+        if the base_role is set on the viewset
+        """
+        qs = super().get_queryset()
+        if self.model and self.model in access_registry:
+            if getattr(self, 'swagger_fake_view', False):
+                return self.model.objects.none()
+            access_class = access_registry[self.model]
+            accessor = access_class(self.request.user, self.request, self)
+            qs = accessor.scope_queryset(queryset=qs, filtered_role=self.base_role)
+
+        return qs
+
+
+class CapabilitiesViewsetMixin:
+    """Mixin that allows a ViewSet to take advantage of the RBAC system
+    """
+
+    model = None
 
     @classmethod
     def add_to_router(cls, router):
@@ -334,21 +382,6 @@ class BasePermissionedViewset(_CoreView):
         # if cls.model and hasattr(cls.model, '__implicit_role_fields'):
         #     RoleViewset.add_to_router(router)
         return router
-
-    def get_queryset(self):
-        """
-        Looks at self.model and returns a subset of items using the accessor class
-        if the base_role is set on the viewset
-        """
-        qs = super().get_queryset()
-        if self.model and self.model in access_registry:
-            if getattr(self, 'swagger_fake_view', False):
-                return self.model.objects.none()
-            access_class = access_registry[self.model]
-            accessor = access_class(self.request.user, self.request, self)
-            qs = accessor.scope_queryset(queryset=qs, filtered_role=self.base_role)
-
-        return qs
 
     @swagger_auto_schema(method='get', manual_parameters=[
         openapi.Parameter(

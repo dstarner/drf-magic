@@ -4,6 +4,9 @@ from django.db.models import QuerySet
 from rest_framework.pagination import \
     PageNumberPagination as _PageNumberPagination
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
+
+from .settings import magic_settings
 
 
 def paginate(func):
@@ -27,5 +30,6 @@ def paginate(func):
 
 class PageNumberPagination(_PageNumberPagination):
 
-    page_size_query_param = 'page_size'
-    max_page_size = 150
+    page_size = getattr(api_settings, 'PAGE_SIZE', magic_settings.PAGE_SIZE)
+    page_size_query_param = magic_settings.PAGE_SIZE_QUERY_PARAM
+    max_page_size = magic_settings.MAX_PAGE_SIZE

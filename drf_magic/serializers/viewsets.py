@@ -5,7 +5,7 @@ from .loader import load_model_serializer
 logger = logging.getLogger(__name__)
 
 
-class AutoSerializerMixin:
+class AutoSerializerViewMixin:
     """Allows for loading serializer classes based on either the action or model type
     """
     model = None
@@ -13,9 +13,8 @@ class AutoSerializerMixin:
     def get_serializer_class(self):
         """Try to do an autolookup of the model's serializer class
         """
-        action_serializer_class = getattr(self, f'{self.action}_serializer_class', None)
-        if action_serializer_class:
-            return action_serializer_class
+        if hasattr(self, 'action') and hasattr(self, f'{self.action}_serializer_class'):
+            return getattr(self, f'{self.action}_serializer_class', None)
 
         if self.serializer_class:
             return self.serializer_class

@@ -40,12 +40,14 @@ SINGLETON_ROLES = [ROLE_SUPERUSER, ROLE_ADMIN, ROLE_STAFF]
 
 ROLE_FIELD_MAX_LENGTH = 64
 
+_available_roles = dict(**_DEFAULT_ROLES)
+
 
 def _make_role_field_choices():
     """Helper to set choices for 'Role.role_field' field
     """
     fix_description = lambda x: x.replace('%s', 'resource')  # noqa: E731
-    return ((key, f'{value.name}: {fix_description(value.description)}') for key, value in _DEFAULT_ROLES.items())
+    return ((key, f'{value.name}: {fix_description(value.description)}') for key, value in _available_roles.items())
 
 
 def check_singleton(func):
@@ -183,10 +185,12 @@ class Role(models.Model):
                 members_to_remove = existing_member_usernames - usernames
                 if members_to_remove:
                     logger.info('Removing %d users from "%s": %s', len(members_to_remove), self, members_to_remove)
-                self.members.set(usernames)
+                qs = get_user_model().objects.filter(username__in=usernames)
+                self.members.set(qs)
             else:      # add whoever is missing
                 for user in usernames:
-                    self.members.add(user)
+                    qs = get_user_model().objects.filter(username=user).first()
+                    self.members.add(qs)
             self.save()
 
     @property
@@ -204,7 +208,7 @@ class Role(models.Model):
 
     @property
     def name(self):
-        return _DEFAULT_ROLES.get(self.key, UNKNOWN_ROLE).name
+        return _available_roles.get(self.key, UNKNOWN_ROLE).name
 
     @property
     def key(self):
@@ -212,7 +216,7 @@ class Role(models.Model):
 
     @property
     def description(self):
-        description = _DEFAULT_ROLES.get(self.role_field, UNKNOWN_ROLE).description
+        description = _available_roles.get(self.role_field, UNKNOWN_ROLE).description
         content_type = self.content_type
         model_name = None
         if content_type:

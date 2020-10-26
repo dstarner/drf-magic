@@ -30,7 +30,7 @@ def register_main_serializer(serializer_class):
     meta_class = getattr(serializer_class, '_meta', serializer_class.Meta)
     model_class = meta_class.model
 
-    if model_class in __serializer_mapper:
+    if model_class in __serializer_mapper and __serializer_mapper[model_class] != serializer_class:
         logger.error('Two serializers listed %s as their model, be careful', model_class)
 
     if not (inspect.isclass(model_class) and issubclass(model_class, Model)):

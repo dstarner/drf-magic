@@ -17,13 +17,13 @@ def user_has_superuser_role(user):
     """
     if not hasattr(user, '_has_superuser_role'):
         if user.pk:
-            user._is_system_administrator = user.roles.filter(
+            user._has_superuser_role = user.roles.filter(
                 singleton_name=ROLE_SUPERUSER,
                 role_field=ROLE_SUPERUSER
             ).exists()
         else:
             # Odd case where user is unsaved, this should never be relied on
-            return False
+            raise AttributeError('User must have pk to check if superuser')
     return user._has_superuser_role
 
 

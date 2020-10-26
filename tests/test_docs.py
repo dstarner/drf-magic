@@ -1,7 +1,7 @@
 from django.test import TestCase
 from rest_framework import views
 
-from .schema import SmartSummaryAutoSchema
+from drf_magic.docs.schema import SmartSummaryAutoSchema
 
 
 class MockView(views.APIView):

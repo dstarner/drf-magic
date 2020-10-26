@@ -18,8 +18,8 @@ Table of Contents
    :maxdepth: 2
    :glob:
 
-   dev/contributing
    areas/*
+   dev/contributing
 
 Indices and tables
 ++++++++++++++++++

@@ -2,7 +2,10 @@ import inspect
 import logging
 
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Model
 from rest_framework.exceptions import ParseError, PermissionDenied
+
+from ..settings import magic_settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +29,18 @@ def check_user_access(user, model_class, action, request=None, view=None, instan
     Return True if user can perform action against model_class with the
     provided parameters.
     """
+    if not inspect.isclass(model_class):
+        instance = model_class
+        model_class = model_class._meta.concrete_model
     access_class = access_registry.get(model_class, None)
     if not access_class:
         if model_class not in missing_warned_about:
-            logger.warning('%s model class is not present in the access registry, allowing full access.', model_class)
+            logger.warning(
+                '%s model class is not present in the access registry, defaulting to %s value',
+                model_class, 'magic_settings.ALLOW_ON_MISSING_ACCESSOR'
+            )
         missing_warned_about.add(model_class)
-        return True
+        return magic_settings.ALLOW_ON_MISSING_ACCESSOR
     access_instance = access_class(user, request=request, view=view, instance=instance, url_kwargs=url_kwargs)
     access_method = getattr(access_instance, 'can_%s' % action, None)
     if action == 'capabilities':
@@ -183,3 +192,35 @@ class BaseAccess:
 class GenericDefaultAccess(BaseAccess):
     """Generic default accessor that can be used for less-special models
     """
+
+
+def register_accessor(access_class, model=None):
+    """
+    Registers a model accessor as the gatekeeper for actions around a resource type
+
+    @register_access
+    class TenantAccess(BaseAccess):
+        ...
+    """
+    model_class = model if model else access_class.model
+
+    if model_class in access_registry:
+        raise ValueError(
+            f'Two model accessors listed {model_class} as their model: '
+            f'{access_class} and {access_registry[model_class]}'
+        )
+
+    if not (inspect.isclass(model_class) and issubclass(model_class, Model)):
+        raise TypeError('model_class should be a Django model class')
+
+    if not (inspect.isclass(model_class) and issubclass(access_class, BaseAccess)):
+        raise TypeError(
+            'register_accessor should only be placed on a class definition that subclasses BaseAccess'
+        )
+
+    if not access_class.model and model_class:  # can be used with generic access classes
+        access_class = type(f'{access_class.__name__}_Wrapper', (access_class,), dict())
+        access_class.model = model_class
+
+    access_registry[model_class] = access_class
+    return access_class
