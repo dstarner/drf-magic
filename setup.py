@@ -25,6 +25,7 @@ setup(
     license=drf_magic.__license__,
     description=drf_magic.__docs__,
     long_description=README,
+    long_description_content_type='text/markdown',
     url=drf_magic.__url__,
     author=drf_magic.__author__,
     classifiers=[

@@ -60,7 +60,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         """
         return filters
 
-    def get_queryset(self):
+    def get_queryset(self, default_queryset=False):
         """
         Tries to build the correct queryset from the current view and parent
         routes.
@@ -73,8 +73,14 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         else:
             qs = super().get_queryset()
 
+        if default_queryset:
+            return qs
+
         # If being accessed through the schema builder, return none
-        format_requested = self.request.GET.get('format', 'json')
+        try:
+            format_requested = self.request.GET.get('format', 'json')
+        except AttributeError:
+            format_requested = 'unknown'
         if any([
                 format_requested in ['openapi', ['openapi']],
                 self.parent_view() is not None and self.kwargs == {}
@@ -203,9 +209,14 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         """
         parent_viewset = cls.parent_view()
         while parent_viewset:
-            if parent_viewset.model == model:
+            if hasattr(parent_viewset, 'model') and parent_viewset.model == model:
                 return parent_viewset
-            parent_viewset = parent_viewset.parent_view()
+            elif hasattr(parent_viewset, 'get_queryset'):
+                qs = parent_viewset().get_queryset(default_queryset=True)
+                if qs.model == model:
+                    return parent_viewset
+
+            parent_viewset = parent_viewset.parent_view() if hasattr(parent_viewset, 'parent_view') else None
         return None
 
     def get_object(self, permission_check=True):
@@ -240,7 +251,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
     # If a custom value is desired, it can be overridden on the concrete view[set] class
 
     @classproperty
-    def base_name(self):
+    def base_name(self):  # pragma: no cover
         if not self.model:
             raise ValueError(f'expected {self} ".model" or ".base_name" to be defined')
         if self.router:
@@ -249,7 +260,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         return default
 
     @classproperty
-    def url_route(self):
+    def url_route(self):  # pragma: no cover
         """Returns the URL portion for this view
         """
         if not self.model:
@@ -257,7 +268,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         return inflection.dasherize(self.model._meta.verbose_name_plural.lower().replace(' ', '_'))
 
     @classproperty
-    def lookup_field(self):
+    def lookup_field(self):  # pragma: no cover
         """Returns the lookup field that is used on the model for get_object()
         """
         if SlugLookupMixin in self.mro():
@@ -265,7 +276,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         return self._lookup_field
 
     @classproperty
-    def lookup_url_kwarg(self):
+    def lookup_url_kwarg(self):  # pragma: no cover
         """Returns the URL regex parameter name that is used on the model for get_object()
         """
         if SlugLookupMixin in self.mro():
@@ -273,7 +284,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         return self._lookup_url_kwarg
 
     @classproperty
-    def lookup_url_prefix(self):
+    def lookup_url_prefix(self):  # pragma: no cover
         """When a child viewset is added, this prefix is appended to its lookup url kwarg
         """
         if not self.model:
@@ -282,7 +293,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         return default
 
     @classproperty
-    def prefixed_lookup_url_kwarg(self):
+    def prefixed_lookup_url_kwarg(self):  # pragma: no cover
         """
         If accessing the URL kwarg on a parent, its lookup_url_kwarg will be prefixed,
         so this is a helper method that can adjust the URL kwargs key lookup dynamically
@@ -290,7 +301,7 @@ class AutoNestedRouterViewsetMixin(metaclass=classproperty.meta):
         return f'{self.lookup_url_prefix}_{self.lookup_url_kwarg}'
 
     @classproperty
-    def router_name(self):
+    def router_name(self):  # pragma: no cover
         """Returns the router name by looking up against the configured model
         """
         if not self.model:

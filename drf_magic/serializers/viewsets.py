@@ -24,6 +24,16 @@ class AutoSerializerViewMixin:
             if serializer_class:
                 return serializer_class
 
+        if hasattr(self, 'get_queryset'):
+            try:
+                qs = self.get_queryset(default_queryset=True)
+            except TypeError:
+                qs = self.get_queryset()
+            if qs and qs.model:
+                serializer_class = load_model_serializer(qs.model)
+                if serializer_class:
+                    return serializer_class
+
         logger.warning(
             'Fell through get_serializer_class, did you create %s correctly?',
             self.__class__.__name__

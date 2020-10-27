@@ -47,3 +47,20 @@ class AutoNestedRouterViewsetMixinTestCase(TestCase, NestedRouteTestCaseMixin):
         response = self.with_request_kwargs(view, request, {'parent_id': parent.id})
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]['c_value'], child.c_value)
+
+    def test_get_object(self):
+        grand_parent = models.GrandParent.objects.create(gp_value=100)
+        parent = models.Parent.objects.create(p_value=1, grand_parent=grand_parent)
+        child = models.Child.objects.create(c_value=5, parent=parent)
+        factory = APIRequestFactory()
+
+        view_class = self.wrap_with_parents(views.ChildViewSet, views.ParentViewSet)
+        view = view_class.as_view({'get': 'retrieve'})
+        request = factory.get('/test/')
+        response = self.with_request_kwargs(view, request, {'parent_id': parent.id, 'id': child.id})
+        self.assertEqual(response.data['id'], child.id)
+
+    def test_parent_view_for_model(self):
+        view_class = self.wrap_with_parents(views.ChildViewSet, views.ParentViewSet, views.GrandParentViewSet)
+        grand_parent_view = view_class.parent_view_for_model(models.GrandParent)
+        self.assertTrue(issubclass(grand_parent_view, views.GrandParentViewSet))
