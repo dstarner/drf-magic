@@ -25,7 +25,7 @@ def main(version):
 
     subprocess.run(['git', 'add', VERSION_FILE])
     subprocess.run(['git', 'commit', '-m', f'Release version {version}'])
-    subprocess.run(['git', 'push', 'main'])
+    subprocess.run(['git', 'push', 'origin', 'main'])
 
     subprocess.run(
         ['git', 'tag', version, '-a', '-m', f'Release version {version}'],
