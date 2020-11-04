@@ -1,7 +1,7 @@
 import os
 
 from pip._internal.req import parse_requirements
-from setuptools import setup
+from setuptools import setup, find_packages
 
 import drf_magic
 
@@ -20,7 +20,7 @@ reqs = [str(ir.requirement) for ir in install_reqs]
 setup(
     name=drf_magic.__package__,
     version=drf_magic.__version__,
-    packages=['drf_magic'],
+    packages=find_packages(exclude=['tests*']),
     include_package_data=True,
     license=drf_magic.__license__,
     description=drf_magic.__docs__,
