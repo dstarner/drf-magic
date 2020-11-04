@@ -1,4 +1,4 @@
-from drf_magic import MagicAppConfig
+from drf_magic.apps import MagicAppConfig
 
 
 class TestAppConfig(MagicAppConfig):

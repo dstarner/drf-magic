@@ -110,7 +110,7 @@ In a real example, it may look like the following, continuing with our ongoing e
     # my_app/apps.py
 
     # Preferred method if also using auto model accessors
-    from drf_magic import MagicAppConfig
+    from drf_magic.apps import MagicAppConfig
 
 
     class MyAppConfig(MagicAppConfig):
