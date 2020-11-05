@@ -6,15 +6,9 @@ from setuptools import setup, find_packages
 import drf_magic
 
 README = open(os.path.join(os.path.dirname(__file__), 'README.md')).read()
-REQUIREMENTS_PATH = 'requirements.txt'
-
 
 # Allow setup.py to be run from any path
 os.chdir(os.path.normpath(os.path.join(os.path.abspath(__file__), os.pardir)))
-
-# Parse out requirements
-install_reqs = parse_requirements(REQUIREMENTS_PATH, session='build')
-reqs = [str(ir.requirement) for ir in install_reqs]
 
 
 setup(
@@ -41,5 +35,14 @@ setup(
         'Topic :: Internet :: WWW/HTTP',
         'Topic :: Internet :: WWW/HTTP :: Dynamic Content'
     ],
-    install_requires=reqs
+    install_requires=[
+        'Django>=3.0.0',
+        'django-admin-list-filter-dropdown>=1.0.3',
+        'django-filter>=2.4.0',
+        'djangorestframework>=3.0.0',
+        'drf-nested-routers>=0.92.0',
+        'drf-yasg2==1.19.3',
+        'python-frontmatter==0.5.0',
+        'inflection>=0.5.1'
+    ]
 )
